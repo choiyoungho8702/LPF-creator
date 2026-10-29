@@ -23,6 +23,7 @@ import { designButterworthLowpass } from "@/lib/butterworth";
 import { generateFloatBiquadCCode } from "@/lib/codegen";
 import { generateFixedPointBiquadCCode } from "@/lib/codegen-fixed";
 import { applyBiquadCascade } from "@/lib/filter";
+import { logFrequencyPosition } from "@/lib/chart-scale";
 import { computeMagnitudeSpectrum } from "@/lib/fft";
 import { parseFlacHeader } from "@/lib/flac";
 import { QFormat } from "@/lib/fixed-point";
@@ -41,20 +42,26 @@ const CHART_WIDTH = 560;
 const CHART_HEIGHT = 160;
 const MIN_DB = -80;
 const MAX_DB = 20;
+const MIN_DISPLAY_FREQUENCY = 20;
 
 function toDb(magnitude: number): number {
   return 20 * Math.log10(Math.max(magnitude, 1e-6));
 }
 
-function buildSpectrumPath(magnitudes: Float64Array): string {
-  return Array.from(magnitudes)
-    .map((magnitude, i) => {
-      const x = (i / (magnitudes.length - 1)) * CHART_WIDTH;
-      const db = Math.max(MIN_DB, Math.min(MAX_DB, toDb(magnitude)));
-      const y = CHART_HEIGHT - ((db - MIN_DB) / (MAX_DB - MIN_DB)) * CHART_HEIGHT;
-      return `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .join(" ");
+/** 로그 주파수 축으로 스펙트럼을 그린다 — 저주파 구간이 선형 축보다 훨씬 잘 보인다. */
+function buildSpectrumPath(magnitudes: Float64Array, sampleRate: number): string {
+  const nyquist = sampleRate / 2;
+  const minFrequency = Math.max(MIN_DISPLAY_FREQUENCY, sampleRate / (2 * magnitudes.length));
+
+  const points: string[] = [];
+  for (let i = 1; i < magnitudes.length; i++) {
+    const frequency = (i * nyquist) / (magnitudes.length - 1);
+    const x = logFrequencyPosition(frequency, minFrequency, nyquist) * CHART_WIDTH;
+    const db = Math.max(MIN_DB, Math.min(MAX_DB, toDb(magnitudes[i])));
+    const y = CHART_HEIGHT - ((db - MIN_DB) / (MAX_DB - MIN_DB)) * CHART_HEIGHT;
+    points.push(`${points.length === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`);
+  }
+  return points.join(" ");
 }
 
 export default function Home() {
@@ -421,7 +428,7 @@ export default function Home() {
             </p>
           )}
 
-          {spectrum && (
+          {spectrum && header && (
             <div className="flex flex-col gap-2">
               <FieldLabel>주파수 스펙트럼 (원본 vs 필터링 후)</FieldLabel>
               <svg
@@ -431,14 +438,14 @@ export default function Home() {
                 aria-label="원본과 필터링 후 주파수 스펙트럼 비교"
               >
                 <path
-                  d={buildSpectrumPath(spectrum.original)}
+                  d={buildSpectrumPath(spectrum.original, header.sampleRate)}
                   fill="none"
                   stroke="currentColor"
                   strokeWidth={1}
                   className="text-muted-foreground"
                 />
                 <path
-                  d={buildSpectrumPath(spectrum.filtered)}
+                  d={buildSpectrumPath(spectrum.filtered, header.sampleRate)}
                   fill="none"
                   stroke="currentColor"
                   strokeWidth={1.5}
@@ -446,7 +453,7 @@ export default function Home() {
                 />
               </svg>
               <p className="text-xs text-muted-foreground">
-                회색: 원본 · 굵은 선: 필터링 후 (가로축: 0~Nyquist, 세로축: dB)
+                회색: 원본 · 굵은 선: 필터링 후 (가로축: 20Hz~Nyquist, 로그 스케일 · 세로축: dB)
               </p>
             </div>
           )}
