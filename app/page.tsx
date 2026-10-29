@@ -76,6 +76,7 @@ export default function Home() {
   const [rawBuffer, setRawBuffer] = useState<ArrayBuffer | null>(null);
   const [rawSampleRate, setRawSampleRate] = useState(44100);
   const [rawChannels, setRawChannels] = useState(1);
+  const [rawBitDepth, setRawBitDepth] = useState<16 | 24>(16);
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -103,17 +104,17 @@ export default function Home() {
 
     const parsedHeader = parseWavHeader(buffer);
 
-    if (parsedHeader.bitDepth !== 16) {
+    if (parsedHeader.bitDepth !== 16 && parsedHeader.bitDepth !== 24) {
       setHeader(null);
       setChannelData(null);
-      setError("현재는 16비트 WAV 파일만 지원합니다.");
+      setError("현재는 16비트 또는 24비트 WAV 파일만 지원합니다.");
       return;
     }
 
     setHeader(parsedHeader);
     setChannelData(
       decodePcmSamples(buffer.slice(WAV_DATA_OFFSET), {
-        bitDepth: 16,
+        bitDepth: parsedHeader.bitDepth as 16 | 24,
         channels: parsedHeader.channels,
       }),
     );
@@ -122,8 +123,8 @@ export default function Home() {
   function handleApplyRawFormat() {
     if (!rawBuffer) return;
 
-    setHeader({ sampleRate: rawSampleRate, bitDepth: 16, channels: rawChannels });
-    setChannelData(decodePcmSamples(rawBuffer, { bitDepth: 16, channels: rawChannels }));
+    setHeader({ sampleRate: rawSampleRate, bitDepth: rawBitDepth, channels: rawChannels });
+    setChannelData(decodePcmSamples(rawBuffer, { bitDepth: rawBitDepth, channels: rawChannels }));
     setRawBuffer(null);
   }
 
@@ -147,7 +148,10 @@ export default function Home() {
     });
 
     const filtered = channelData.map((samples) => applyBiquadCascade(samples, sections));
-    const buffer = encodeWavFile(filtered, { sampleRate: header.sampleRate, bitDepth: 16 });
+    const buffer = encodeWavFile(filtered, {
+      sampleRate: header.sampleRate,
+      bitDepth: header.bitDepth as 16 | 24,
+    });
     const blob = new Blob([buffer], { type: "audio/wav" });
 
     setResultUrl((previous) => {
@@ -233,7 +237,7 @@ export default function Home() {
 
         <FieldGroup>
           <Field>
-            <FieldLabel htmlFor="file">오디오 파일 (WAV 16비트, 또는 raw/pcm)</FieldLabel>
+            <FieldLabel htmlFor="file">오디오 파일 (WAV 16/24비트, 또는 raw/pcm)</FieldLabel>
             <Input id="file" type="file" accept=".wav,.raw,.pcm" onChange={handleFileChange} />
           </Field>
 
@@ -251,6 +255,21 @@ export default function Home() {
                     value={rawSampleRate}
                     onChange={(e) => setRawSampleRate(Number(e.target.value))}
                   />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="rawBitDepth">Bit Depth</FieldLabel>
+                  <Select
+                    value={String(rawBitDepth)}
+                    onValueChange={(value) => setRawBitDepth(Number(value) as 16 | 24)}
+                  >
+                    <SelectTrigger id="rawBitDepth">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="16">16-bit</SelectItem>
+                      <SelectItem value="24">24-bit</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </Field>
                 <Field>
                   <FieldLabel htmlFor="rawChannels">Channels</FieldLabel>
