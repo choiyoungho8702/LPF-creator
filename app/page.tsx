@@ -23,8 +23,6 @@ import { designButterworthLowpass } from "@/lib/butterworth";
 import { generateFloatBiquadCCode } from "@/lib/codegen";
 import { generateFixedPointBiquadCCode } from "@/lib/codegen-fixed";
 import { applyBiquadCascade } from "@/lib/filter";
-import { formatFrequencyLabel, logFrequencyPosition, niceFrequencyTicks } from "@/lib/chart-scale";
-import { computeMagnitudeSpectrum } from "@/lib/fft";
 import { parseFlacHeader } from "@/lib/flac";
 import { QFormat } from "@/lib/fixed-point";
 import { simulateFixedPointBiquadCascade } from "@/lib/fixed-point-simulate";
@@ -32,46 +30,27 @@ import { decodePcmSamples } from "@/lib/pcm";
 import { parsePreset, serializePreset, type LpfPreset } from "@/lib/preset";
 import { computeMaxAbsoluteError } from "@/lib/quantization-error";
 import { recommendCutoffFrequency } from "@/lib/smart-recommend";
-import { trimSettlingTime } from "@/lib/spectrum-view";
+import { computeSpectrogram, type SpectrogramResult } from "@/lib/spectrogram";
+import { SpectrogramView } from "@/components/spectrogram-view";
+
+const SPECTROGRAM_WINDOW_SIZE = 1024;
+const SPECTROGRAM_HOP_SIZE = 256;
 import { WAV_DATA_OFFSET, encodeWavFile, parseWavHeader, type WavHeader } from "@/lib/wav";
 
 const ORDER_OPTIONS = [2, 4, 6, 8] as const;
 const Q_FORMAT_OPTIONS = ["Q15", "Q23", "Q31"] as const;
 type QFormatName = (typeof Q_FORMAT_OPTIONS)[number];
 
-const CHART_MARGIN = { top: 8, right: 8, bottom: 20, left: 34 };
-const CHART_WIDTH = 560;
-const CHART_HEIGHT = 160;
-const PLOT_WIDTH = CHART_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
-const PLOT_HEIGHT = CHART_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
-const MIN_DB = -80;
-const MAX_DB = 20;
-const DB_TICKS = [20, 0, -20, -40, -60, -80];
-const MIN_DISPLAY_FREQUENCY = 20;
-
-function toDb(magnitude: number): number {
-  return 20 * Math.log10(Math.max(magnitude, 1e-6));
+interface GeneratedFile {
+  name: string;
+  url: string;
+  kind: "wav" | "c";
+  createdAt: number;
 }
 
-function dbToY(db: number): number {
-  const clamped = Math.max(MIN_DB, Math.min(MAX_DB, db));
-  return PLOT_HEIGHT - ((clamped - MIN_DB) / (MAX_DB - MIN_DB)) * PLOT_HEIGHT;
-}
-
-/** 로그 주파수 축으로 스펙트럼을 그린다 — 저주파 구간이 선형 축보다 훨씬 잘 보인다. */
-function buildSpectrumPath(magnitudes: Float64Array, sampleRate: number): string {
-  const nyquist = sampleRate / 2;
-  const minFrequency = Math.max(MIN_DISPLAY_FREQUENCY, sampleRate / (2 * magnitudes.length));
-
-  const points: string[] = [];
-  for (let i = 1; i < magnitudes.length; i++) {
-    const frequency = (i * nyquist) / (magnitudes.length - 1);
-    const x = logFrequencyPosition(frequency, minFrequency, nyquist) * PLOT_WIDTH;
-    const y = dbToY(toDb(magnitudes[i]));
-    points.push(`${points.length === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`);
-  }
-  return points.join(" ");
-}
+const SAMPLE_AUDIO_FILES = [
+  { name: "sample-broadband-sweep.wav", label: "샘플: 20Hz~20kHz 스윕" },
+];
 
 export default function Home() {
   const [header, setHeader] = useState<WavHeader | null>(null);
@@ -85,9 +64,10 @@ export default function Home() {
   const [generatedCode, setGeneratedCode] = useState<string | null>(null);
   const [overflowDetected, setOverflowDetected] = useState(false);
   const [quantizationError, setQuantizationError] = useState<number | null>(null);
-  const [spectrum, setSpectrum] = useState<{ original: Float64Array; filtered: Float64Array } | null>(
-    null,
-  );
+  const [spectrogramData, setSpectrogramData] = useState<{
+    original: SpectrogramResult;
+    filtered: SpectrogramResult;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -96,10 +76,23 @@ export default function Home() {
   const [rawChannels, setRawChannels] = useState(1);
   const [rawBitDepth, setRawBitDepth] = useState<16 | 24>(16);
 
-  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const [manualSampleRate, setManualSampleRate] = useState(44100);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [isSpectrumOpen, setIsSpectrumOpen] = useState(true);
+  const [generatedFiles, setGeneratedFiles] = useState<GeneratedFile[]>([]);
 
+  const effectiveSampleRate = header?.sampleRate ?? manualSampleRate;
+
+  function addGeneratedFile(file: GeneratedFile) {
+    setGeneratedFiles((previous) => {
+      const next = [file, ...previous];
+      const evicted = next.splice(10);
+      evicted.forEach((f) => URL.revokeObjectURL(f.url));
+      return next;
+    });
+  }
+
+  async function processFile(file: File) {
     setError(null);
     setResultUrl(null);
 
@@ -138,12 +131,63 @@ export default function Home() {
     );
   }
 
+  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) await processFile(file);
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setIsDraggingOver(false);
+    const file = event.dataTransfer.files?.[0];
+    if (file) await processFile(file);
+  }
+
+  async function handleLoadSample(url: string, name: string) {
+    const buffer = await fetch(url).then((r) => r.blob());
+    await processFile(new File([buffer], name, { type: "audio/wav" }));
+  }
+
   function handleApplyRawFormat() {
     if (!rawBuffer) return;
 
     setHeader({ sampleRate: rawSampleRate, bitDepth: rawBitDepth, channels: rawChannels });
     setChannelData(decodePcmSamples(rawBuffer, { bitDepth: rawBitDepth, channels: rawChannels }));
     setRawBuffer(null);
+  }
+
+  function handleGenerateCodeOnly() {
+    if (cutoffFrequency >= effectiveSampleRate / 2) {
+      setError(
+        `Fc(${cutoffFrequency}Hz)는 Nyquist 주파수(${effectiveSampleRate / 2}Hz) 미만이어야 합니다.`,
+      );
+      return;
+    }
+
+    setError(null);
+
+    const sections = designButterworthLowpass({
+      sampleRate: effectiveSampleRate,
+      cutoffFrequency,
+      order,
+    });
+
+    const code =
+      arithmeticMode === "float"
+        ? generateFloatBiquadCCode({ sections, blockSize })
+        : generateFixedPointBiquadCCode({ sections, blockSize, qFormat: QFormat[qFormatName] });
+
+    setGeneratedCode(code);
+    setOverflowDetected(false);
+    setQuantizationError(null);
+
+    const blob = new Blob([code], { type: "text/x-c" });
+    addGeneratedFile({
+      name: `lpf_${arithmeticMode}_fc${cutoffFrequency}.c`,
+      url: URL.createObjectURL(blob),
+      kind: "c",
+      createdAt: Date.now(),
+    });
   }
 
   async function handleRun() {
@@ -175,26 +219,51 @@ export default function Home() {
         bitDepth: header.bitDepth as 16 | 24,
       });
       const blob = new Blob([buffer], { type: "audio/wav" });
+      const wavUrl = URL.createObjectURL(blob);
 
       setResultUrl((previous) => {
         if (previous) URL.revokeObjectURL(previous);
-        return URL.createObjectURL(blob);
+        return wavUrl;
+      });
+      addGeneratedFile({
+        name: `lpf_result_fc${cutoffFrequency}.wav`,
+        url: wavUrl,
+        kind: "wav",
+        createdAt: Date.now(),
       });
 
-      setSpectrum({
-        original: computeMagnitudeSpectrum(trimSettlingTime(channelData[0], header.sampleRate)),
-        filtered: computeMagnitudeSpectrum(trimSettlingTime(filtered[0], header.sampleRate)),
+      const spectrogramOptions = {
+        windowSize: SPECTROGRAM_WINDOW_SIZE,
+        hopSize: SPECTROGRAM_HOP_SIZE,
+      };
+      setSpectrogramData({
+        original: computeSpectrogram(channelData[0], header.sampleRate, spectrogramOptions),
+        filtered: computeSpectrogram(filtered[0], header.sampleRate, spectrogramOptions),
       });
 
       if (arithmeticMode === "float") {
-        setGeneratedCode(generateFloatBiquadCCode({ sections, blockSize }));
+        const code = generateFloatBiquadCCode({ sections, blockSize });
+        setGeneratedCode(code);
         setOverflowDetected(false);
         setQuantizationError(null);
+        addGeneratedFile({
+          name: `lpf_float_fc${cutoffFrequency}.c`,
+          url: URL.createObjectURL(new Blob([code], { type: "text/x-c" })),
+          kind: "c",
+          createdAt: Date.now(),
+        });
         return;
       }
 
       const qFormat = QFormat[qFormatName];
-      setGeneratedCode(generateFixedPointBiquadCCode({ sections, blockSize, qFormat }));
+      const code = generateFixedPointBiquadCCode({ sections, blockSize, qFormat });
+      setGeneratedCode(code);
+      addGeneratedFile({
+        name: `lpf_fixed_${qFormatName}_fc${cutoffFrequency}.c`,
+        url: URL.createObjectURL(new Blob([code], { type: "text/x-c" })),
+        kind: "c",
+        createdAt: Date.now(),
+      });
 
       const simulations = channelData.map((samples) =>
         simulateFixedPointBiquadCascade(samples, sections, qFormat),
@@ -263,8 +332,37 @@ export default function Home() {
         <FieldGroup>
           <Field>
             <FieldLabel htmlFor="file">오디오 파일 (WAV 16/24비트, FLAC(헤더만), 또는 raw/pcm)</FieldLabel>
-            <Input id="file" type="file" accept=".wav,.flac,.raw,.pcm" onChange={handleFileChange} />
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDraggingOver(true);
+              }}
+              onDragLeave={() => setIsDraggingOver(false)}
+              onDrop={handleDrop}
+              className={`rounded-md border-2 border-dashed p-3 transition-colors ${
+                isDraggingOver ? "border-primary bg-accent" : "border-input"
+              }`}
+            >
+              <Input id="file" type="file" accept=".wav,.flac,.raw,.pcm" onChange={handleFileChange} />
+              <p className="mt-1 text-xs text-muted-foreground">
+                파일을 여기로 끌어다 놓아도 됩니다
+              </p>
+            </div>
           </Field>
+
+          <div className="flex flex-wrap gap-2">
+            {SAMPLE_AUDIO_FILES.map((sample) => (
+              <Button
+                key={sample.name}
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => handleLoadSample(`/samples/${sample.name}`, sample.name)}
+              >
+                {sample.label}
+              </Button>
+            ))}
+          </div>
 
           <Dialog open={rawBuffer !== null} onOpenChange={(open) => !open && setRawBuffer(null)}>
             <DialogContent>
@@ -320,11 +418,23 @@ export default function Home() {
             </DialogContent>
           </Dialog>
 
-          {header && (
+          {header ? (
             <p className="text-sm text-muted-foreground">
               Fs: {header.sampleRate}Hz · 비트 뎁스: {header.bitDepth}bit · 채널:{" "}
               {header.channels}
             </p>
+          ) : (
+            <Field orientation="responsive">
+              <FieldLabel htmlFor="manualSampleRate">
+                Sampling Rate (Hz) — 음원 없이 C 코드만 생성할 때 사용
+              </FieldLabel>
+              <Input
+                id="manualSampleRate"
+                type="number"
+                value={manualSampleRate}
+                onChange={(e) => setManualSampleRate(Number(e.target.value))}
+              />
+            </Field>
           )}
 
           <Button
@@ -421,9 +531,14 @@ export default function Home() {
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 
-          <Button onClick={handleRun} disabled={!header || !channelData || isProcessing}>
-            {isProcessing ? "처리 중..." : "실행"}
-          </Button>
+          <div className="flex gap-3">
+            <Button onClick={handleRun} disabled={!header || !channelData || isProcessing}>
+              {isProcessing ? "처리 중..." : "실행"}
+            </Button>
+            <Button type="button" variant="outline" onClick={handleGenerateCodeOnly}>
+              C 코드만 생성
+            </Button>
+          </div>
 
           {arithmeticMode === "fixed" && overflowDetected && (
             <p className="text-sm text-destructive">
@@ -437,103 +552,26 @@ export default function Home() {
             </p>
           )}
 
-          {spectrum && header && (() => {
-            const nyquist = header.sampleRate / 2;
-            const minFrequency = Math.max(
-              MIN_DISPLAY_FREQUENCY,
-              header.sampleRate / (2 * spectrum.original.length),
-            );
-            const freqTicks = niceFrequencyTicks(minFrequency, nyquist);
-
-            return (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <FieldLabel>주파수 스펙트럼</FieldLabel>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                    <span className="flex items-center gap-1">
-                      <span className="inline-block h-0.5 w-3 bg-[#2a78d6] dark:bg-[#3987e5]" />
-                      원본
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="inline-block h-0.5 w-3 bg-[#e34948] dark:bg-[#e66767]" />
-                      필터링 후
-                    </span>
-                  </div>
+          {spectrogramData && (
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => setIsSpectrumOpen((open) => !open)}
+                className="flex items-center gap-1 text-left"
+              >
+                <FieldLabel>시간-주파수 분포 (스펙트로그램)</FieldLabel>
+                <span className="text-xs text-muted-foreground">
+                  {isSpectrumOpen ? "▲ 접기" : "▼ 펼치기"}
+                </span>
+              </button>
+              {isSpectrumOpen && (
+                <div className="flex flex-col gap-3">
+                  <SpectrogramView result={spectrogramData.original} label="원본" />
+                  <SpectrogramView result={spectrogramData.filtered} label="필터링 후" />
                 </div>
-                <svg
-                  viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
-                  className="w-full rounded-md border bg-card"
-                  role="img"
-                  aria-label="원본과 필터링 후 주파수 스펙트럼 비교"
-                >
-                  <g transform={`translate(${CHART_MARGIN.left},${CHART_MARGIN.top})`}>
-                    {DB_TICKS.map((db) => (
-                      <g key={db}>
-                        <line
-                          x1={0}
-                          x2={PLOT_WIDTH}
-                          y1={dbToY(db)}
-                          y2={dbToY(db)}
-                          stroke="currentColor"
-                          strokeWidth={1}
-                          className="text-border"
-                        />
-                        <text
-                          x={-6}
-                          y={dbToY(db)}
-                          textAnchor="end"
-                          dominantBaseline="middle"
-                          className="fill-muted-foreground text-[9px]"
-                        >
-                          {db}
-                        </text>
-                      </g>
-                    ))}
-
-                    {freqTicks.map((freq) => {
-                      const x = logFrequencyPosition(freq, minFrequency, nyquist) * PLOT_WIDTH;
-                      return (
-                        <g key={freq}>
-                          <line
-                            x1={x}
-                            x2={x}
-                            y1={0}
-                            y2={PLOT_HEIGHT}
-                            stroke="currentColor"
-                            strokeWidth={1}
-                            className="text-border"
-                          />
-                          <text
-                            x={x}
-                            y={PLOT_HEIGHT + 12}
-                            textAnchor="middle"
-                            className="fill-muted-foreground text-[9px]"
-                          >
-                            {formatFrequencyLabel(freq)}
-                          </text>
-                        </g>
-                      );
-                    })}
-
-                    <path
-                      d={buildSpectrumPath(spectrum.original, header.sampleRate)}
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.5}
-                      className="text-[#2a78d6] dark:text-[#3987e5]"
-                    />
-                    <path
-                      d={buildSpectrumPath(spectrum.filtered, header.sampleRate)}
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.5}
-                      className="text-[#e34948] dark:text-[#e66767]"
-                    />
-                  </g>
-                </svg>
-              </div>
-            );
-          })()}
+              )}
+            </div>
+          )}
 
           {resultUrl && <audio controls src={resultUrl} className="w-full" />}
 
@@ -548,6 +586,28 @@ export default function Home() {
               <pre className="max-h-80 overflow-auto rounded-md bg-muted p-4 text-xs">
                 <code>{generatedCode}</code>
               </pre>
+            </div>
+          )}
+
+          {generatedFiles.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <FieldLabel>생성된 파일</FieldLabel>
+              <ul className="flex flex-col gap-1 rounded-md border bg-card p-3 text-sm">
+                {generatedFiles.map((file) => (
+                  <li key={file.url} className="flex items-center justify-between gap-2">
+                    <span className="truncate">
+                      {file.kind === "wav" ? "🎵" : "💻"} {file.name}
+                    </span>
+                    <a
+                      href={file.url}
+                      download={file.name}
+                      className="shrink-0 text-xs text-primary underline underline-offset-2"
+                    >
+                      다운로드
+                    </a>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </FieldGroup>
