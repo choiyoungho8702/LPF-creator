@@ -21,6 +21,7 @@ import { QFormat } from "@/lib/fixed-point";
 import { simulateFixedPointBiquadCascade } from "@/lib/fixed-point-simulate";
 import { decodePcmSamples } from "@/lib/pcm";
 import { computeMaxAbsoluteError } from "@/lib/quantization-error";
+import { recommendCutoffFrequency } from "@/lib/smart-recommend";
 import { WAV_DATA_OFFSET, encodeWavFile, parseWavHeader, type WavHeader } from "@/lib/wav";
 
 const ORDER_OPTIONS = [2, 4, 6, 8] as const;
@@ -147,6 +148,11 @@ export default function Home() {
     await navigator.clipboard.writeText(generatedCode);
   }
 
+  function handleSmartRecommend() {
+    if (!header || !channelData) return;
+    setCutoffFrequency(Math.round(recommendCutoffFrequency(channelData[0], header.sampleRate)));
+  }
+
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-6 py-24">
       <div className="flex w-full max-w-xl flex-col gap-10">
@@ -171,6 +177,15 @@ export default function Home() {
               {header.channels}
             </p>
           )}
+
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleSmartRecommend}
+            disabled={!header || !channelData}
+          >
+            🪄 스마트 추천
+          </Button>
 
           <Field orientation="responsive">
             <FieldLabel htmlFor="fc">Cutoff Frequency (Fc)</FieldLabel>
