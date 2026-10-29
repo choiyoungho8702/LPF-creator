@@ -24,6 +24,7 @@ import { generateFloatBiquadCCode } from "@/lib/codegen";
 import { generateFixedPointBiquadCCode } from "@/lib/codegen-fixed";
 import { applyBiquadCascade } from "@/lib/filter";
 import { computeMagnitudeSpectrum } from "@/lib/fft";
+import { parseFlacHeader } from "@/lib/flac";
 import { QFormat } from "@/lib/fixed-point";
 import { simulateFixedPointBiquadCascade } from "@/lib/fixed-point-simulate";
 import { decodePcmSamples } from "@/lib/pcm";
@@ -86,15 +87,15 @@ export default function Home() {
     setError(null);
     setResultUrl(null);
 
-    if (/\.flac$/i.test(file.name)) {
-      setHeader(null);
-      setChannelData(null);
-      setError("FLAC 음원 디코딩은 아직 지원하지 않습니다. 헤더 메타데이터만 읽을 수 있습니다.");
-      return;
-    }
-
     const isRaw = /\.(raw|pcm)$/i.test(file.name);
     const buffer = await file.arrayBuffer();
+
+    if (/\.flac$/i.test(file.name)) {
+      setHeader(parseFlacHeader(buffer));
+      setChannelData(null);
+      setError("FLAC은 헤더 정보만 읽을 수 있습니다. 오디오 디코딩은 아직 지원하지 않아 실행할 수 없습니다.");
+      return;
+    }
 
     if (isRaw) {
       setHeader(null);
@@ -245,8 +246,8 @@ export default function Home() {
 
         <FieldGroup>
           <Field>
-            <FieldLabel htmlFor="file">오디오 파일 (WAV 16/24비트, 또는 raw/pcm)</FieldLabel>
-            <Input id="file" type="file" accept=".wav,.raw,.pcm" onChange={handleFileChange} />
+            <FieldLabel htmlFor="file">오디오 파일 (WAV 16/24비트, FLAC(헤더만), 또는 raw/pcm)</FieldLabel>
+            <Input id="file" type="file" accept=".wav,.flac,.raw,.pcm" onChange={handleFileChange} />
           </Field>
 
           <Dialog open={rawBuffer !== null} onOpenChange={(open) => !open && setRawBuffer(null)}>
