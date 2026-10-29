@@ -256,7 +256,7 @@ export default function Home() {
             LPF Creator
           </h1>
           <p className="text-muted-foreground">
-            WAV 파일을 불러와 Butterworth 저역통과필터를 적용하고 결과를 들어보세요.
+            WAV 파일로 Butterworth 저역통과필터를 시뮬레이션·검증하고, 임베디드 프로젝트에 바로 쓸 수 있는 실시간 C 코드까지 생성하세요.
           </p>
         </div>
 
