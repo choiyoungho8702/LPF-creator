@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
@@ -20,6 +20,7 @@ import { computeMagnitudeSpectrum } from "@/lib/fft";
 import { QFormat } from "@/lib/fixed-point";
 import { simulateFixedPointBiquadCascade } from "@/lib/fixed-point-simulate";
 import { decodePcmSamples } from "@/lib/pcm";
+import { parsePreset, serializePreset, type LpfPreset } from "@/lib/preset";
 import { computeMaxAbsoluteError } from "@/lib/quantization-error";
 import { recommendCutoffFrequency } from "@/lib/smart-recommend";
 import { WAV_DATA_OFFSET, encodeWavFile, parseWavHeader, type WavHeader } from "@/lib/wav";
@@ -153,6 +154,36 @@ export default function Home() {
     setCutoffFrequency(Math.round(recommendCutoffFrequency(channelData[0], header.sampleRate)));
   }
 
+  function handleSavePreset() {
+    const preset: LpfPreset = { cutoffFrequency, order, blockSize, arithmeticMode, qFormatName };
+    const blob = new Blob([serializePreset(preset)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "lpf-preset.json";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleLoadPreset(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const preset = parsePreset(await file.text());
+      setCutoffFrequency(preset.cutoffFrequency);
+      setOrder(preset.order);
+      setBlockSize(preset.blockSize);
+      setArithmeticMode(preset.arithmeticMode);
+      setQFormatName(preset.qFormatName);
+      setError(null);
+    } catch {
+      setError("프리셋 파일을 읽을 수 없습니다. 올바른 JSON 형식인지 확인해주세요.");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-6 py-24">
       <div className="flex w-full max-w-xl flex-col gap-10">
@@ -259,6 +290,16 @@ export default function Home() {
               </Select>
             </Field>
           )}
+
+          <div className="flex gap-3">
+            <Button type="button" variant="outline" onClick={handleSavePreset}>
+              💾 프리셋 저장
+            </Button>
+            <label className={buttonVariants({ variant: "outline" })}>
+              프리셋 불러오기
+              <input type="file" accept=".json" className="hidden" onChange={handleLoadPreset} />
+            </label>
+          </div>
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 
