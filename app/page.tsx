@@ -23,6 +23,7 @@ import { designButterworthLowpass } from "@/lib/butterworth";
 import { generateFloatBiquadCCode } from "@/lib/codegen";
 import { generateFixedPointBiquadCCode } from "@/lib/codegen-fixed";
 import { applyBiquadCascade } from "@/lib/filter";
+import { formatFrequencyLabel, logFrequencyPosition, niceFrequencyTicks } from "@/lib/chart-scale";
 import { computeMagnitudeSpectrum } from "@/lib/fft";
 import { parseFlacHeader } from "@/lib/flac";
 import { QFormat } from "@/lib/fixed-point";
@@ -31,30 +32,45 @@ import { decodePcmSamples } from "@/lib/pcm";
 import { parsePreset, serializePreset, type LpfPreset } from "@/lib/preset";
 import { computeMaxAbsoluteError } from "@/lib/quantization-error";
 import { recommendCutoffFrequency } from "@/lib/smart-recommend";
+import { trimSettlingTime } from "@/lib/spectrum-view";
 import { WAV_DATA_OFFSET, encodeWavFile, parseWavHeader, type WavHeader } from "@/lib/wav";
 
 const ORDER_OPTIONS = [2, 4, 6, 8] as const;
 const Q_FORMAT_OPTIONS = ["Q15", "Q23", "Q31"] as const;
 type QFormatName = (typeof Q_FORMAT_OPTIONS)[number];
 
+const CHART_MARGIN = { top: 8, right: 8, bottom: 20, left: 34 };
 const CHART_WIDTH = 560;
 const CHART_HEIGHT = 160;
+const PLOT_WIDTH = CHART_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
+const PLOT_HEIGHT = CHART_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
 const MIN_DB = -80;
 const MAX_DB = 20;
+const DB_TICKS = [20, 0, -20, -40, -60, -80];
+const MIN_DISPLAY_FREQUENCY = 20;
 
 function toDb(magnitude: number): number {
   return 20 * Math.log10(Math.max(magnitude, 1e-6));
 }
 
-function buildSpectrumPath(magnitudes: Float64Array): string {
-  return Array.from(magnitudes)
-    .map((magnitude, i) => {
-      const x = (i / (magnitudes.length - 1)) * CHART_WIDTH;
-      const db = Math.max(MIN_DB, Math.min(MAX_DB, toDb(magnitude)));
-      const y = CHART_HEIGHT - ((db - MIN_DB) / (MAX_DB - MIN_DB)) * CHART_HEIGHT;
-      return `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .join(" ");
+function dbToY(db: number): number {
+  const clamped = Math.max(MIN_DB, Math.min(MAX_DB, db));
+  return PLOT_HEIGHT - ((clamped - MIN_DB) / (MAX_DB - MIN_DB)) * PLOT_HEIGHT;
+}
+
+/** 로그 주파수 축으로 스펙트럼을 그린다 — 저주파 구간이 선형 축보다 훨씬 잘 보인다. */
+function buildSpectrumPath(magnitudes: Float64Array, sampleRate: number): string {
+  const nyquist = sampleRate / 2;
+  const minFrequency = Math.max(MIN_DISPLAY_FREQUENCY, sampleRate / (2 * magnitudes.length));
+
+  const points: string[] = [];
+  for (let i = 1; i < magnitudes.length; i++) {
+    const frequency = (i * nyquist) / (magnitudes.length - 1);
+    const x = logFrequencyPosition(frequency, minFrequency, nyquist) * PLOT_WIDTH;
+    const y = dbToY(toDb(magnitudes[i]));
+    points.push(`${points.length === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`);
+  }
+  return points.join(" ");
 }
 
 export default function Home() {
@@ -166,8 +182,8 @@ export default function Home() {
       });
 
       setSpectrum({
-        original: computeMagnitudeSpectrum(channelData[0]),
-        filtered: computeMagnitudeSpectrum(filtered[0]),
+        original: computeMagnitudeSpectrum(trimSettlingTime(channelData[0], header.sampleRate)),
+        filtered: computeMagnitudeSpectrum(trimSettlingTime(filtered[0], header.sampleRate)),
       });
 
       if (arithmeticMode === "float") {
@@ -240,7 +256,7 @@ export default function Home() {
             LPF Creator
           </h1>
           <p className="text-muted-foreground">
-            WAV 파일을 불러와 Butterworth 저역통과필터를 적용하고 결과를 들어보세요.
+            WAV 파일로 Butterworth 저역통과필터를 시뮬레이션·검증하고, 임베디드 프로젝트에 바로 쓸 수 있는 실시간 C 코드까지 생성하세요.
           </p>
         </div>
 
@@ -421,35 +437,103 @@ export default function Home() {
             </p>
           )}
 
-          {spectrum && (
-            <div className="flex flex-col gap-2">
-              <FieldLabel>주파수 스펙트럼 (원본 vs 필터링 후)</FieldLabel>
-              <svg
-                viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
-                className="w-full rounded-md border bg-card"
-                role="img"
-                aria-label="원본과 필터링 후 주파수 스펙트럼 비교"
-              >
-                <path
-                  d={buildSpectrumPath(spectrum.original)}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1}
-                  className="text-muted-foreground"
-                />
-                <path
-                  d={buildSpectrumPath(spectrum.filtered)}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                  className="text-primary"
-                />
-              </svg>
-              <p className="text-xs text-muted-foreground">
-                회색: 원본 · 굵은 선: 필터링 후 (가로축: 0~Nyquist, 세로축: dB)
-              </p>
-            </div>
-          )}
+          {spectrum && header && (() => {
+            const nyquist = header.sampleRate / 2;
+            const minFrequency = Math.max(
+              MIN_DISPLAY_FREQUENCY,
+              header.sampleRate / (2 * spectrum.original.length),
+            );
+            const freqTicks = niceFrequencyTicks(minFrequency, nyquist);
+
+            return (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <FieldLabel>주파수 스펙트럼</FieldLabel>
+                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block h-0.5 w-3 bg-[#2a78d6] dark:bg-[#3987e5]" />
+                      원본
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block h-0.5 w-3 bg-[#e34948] dark:bg-[#e66767]" />
+                      필터링 후
+                    </span>
+                  </div>
+                </div>
+                <svg
+                  viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+                  className="w-full rounded-md border bg-card"
+                  role="img"
+                  aria-label="원본과 필터링 후 주파수 스펙트럼 비교"
+                >
+                  <g transform={`translate(${CHART_MARGIN.left},${CHART_MARGIN.top})`}>
+                    {DB_TICKS.map((db) => (
+                      <g key={db}>
+                        <line
+                          x1={0}
+                          x2={PLOT_WIDTH}
+                          y1={dbToY(db)}
+                          y2={dbToY(db)}
+                          stroke="currentColor"
+                          strokeWidth={1}
+                          className="text-border"
+                        />
+                        <text
+                          x={-6}
+                          y={dbToY(db)}
+                          textAnchor="end"
+                          dominantBaseline="middle"
+                          className="fill-muted-foreground text-[9px]"
+                        >
+                          {db}
+                        </text>
+                      </g>
+                    ))}
+
+                    {freqTicks.map((freq) => {
+                      const x = logFrequencyPosition(freq, minFrequency, nyquist) * PLOT_WIDTH;
+                      return (
+                        <g key={freq}>
+                          <line
+                            x1={x}
+                            x2={x}
+                            y1={0}
+                            y2={PLOT_HEIGHT}
+                            stroke="currentColor"
+                            strokeWidth={1}
+                            className="text-border"
+                          />
+                          <text
+                            x={x}
+                            y={PLOT_HEIGHT + 12}
+                            textAnchor="middle"
+                            className="fill-muted-foreground text-[9px]"
+                          >
+                            {formatFrequencyLabel(freq)}
+                          </text>
+                        </g>
+                      );
+                    })}
+
+                    <path
+                      d={buildSpectrumPath(spectrum.original, header.sampleRate)}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.5}
+                      className="text-[#2a78d6] dark:text-[#3987e5]"
+                    />
+                    <path
+                      d={buildSpectrumPath(spectrum.filtered, header.sampleRate)}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.5}
+                      className="text-[#e34948] dark:text-[#e66767]"
+                    />
+                  </g>
+                </svg>
+              </div>
+            );
+          })()}
 
           {resultUrl && <audio controls src={resultUrl} className="w-full" />}
 
