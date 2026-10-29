@@ -32,6 +32,7 @@ import { decodePcmSamples } from "@/lib/pcm";
 import { parsePreset, serializePreset, type LpfPreset } from "@/lib/preset";
 import { computeMaxAbsoluteError } from "@/lib/quantization-error";
 import { recommendCutoffFrequency } from "@/lib/smart-recommend";
+import { trimSettlingTime } from "@/lib/spectrum-view";
 import { WAV_DATA_OFFSET, encodeWavFile, parseWavHeader, type WavHeader } from "@/lib/wav";
 
 const ORDER_OPTIONS = [2, 4, 6, 8] as const;
@@ -181,8 +182,8 @@ export default function Home() {
       });
 
       setSpectrum({
-        original: computeMagnitudeSpectrum(channelData[0]),
-        filtered: computeMagnitudeSpectrum(filtered[0]),
+        original: computeMagnitudeSpectrum(trimSettlingTime(channelData[0], header.sampleRate)),
+        filtered: computeMagnitudeSpectrum(trimSettlingTime(filtered[0], header.sampleRate)),
       });
 
       if (arithmeticMode === "float") {
