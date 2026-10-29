@@ -72,6 +72,7 @@ export default function Home() {
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const [rawBuffer, setRawBuffer] = useState<ArrayBuffer | null>(null);
   const [rawSampleRate, setRawSampleRate] = useState(44100);
@@ -128,7 +129,7 @@ export default function Home() {
     setRawBuffer(null);
   }
 
-  function handleRun() {
+  async function handleRun() {
     if (!header || !channelData) return;
 
     if (cutoffFrequency >= header.sampleRate / 2) {
@@ -140,47 +141,54 @@ export default function Home() {
     }
 
     setError(null);
+    setIsProcessing(true);
+    // 로딩 상태가 실제로 화면에 그려지도록 다음 프레임까지 양보한 뒤 무거운 계산을 시작한다.
+    await new Promise((resolve) => requestAnimationFrame(resolve));
 
-    const sections = designButterworthLowpass({
-      sampleRate: header.sampleRate,
-      cutoffFrequency,
-      order,
-    });
+    try {
+      const sections = designButterworthLowpass({
+        sampleRate: header.sampleRate,
+        cutoffFrequency,
+        order,
+      });
 
-    const filtered = channelData.map((samples) => applyBiquadCascade(samples, sections));
-    const buffer = encodeWavFile(filtered, {
-      sampleRate: header.sampleRate,
-      bitDepth: header.bitDepth as 16 | 24,
-    });
-    const blob = new Blob([buffer], { type: "audio/wav" });
+      const filtered = channelData.map((samples) => applyBiquadCascade(samples, sections));
+      const buffer = encodeWavFile(filtered, {
+        sampleRate: header.sampleRate,
+        bitDepth: header.bitDepth as 16 | 24,
+      });
+      const blob = new Blob([buffer], { type: "audio/wav" });
 
-    setResultUrl((previous) => {
-      if (previous) URL.revokeObjectURL(previous);
-      return URL.createObjectURL(blob);
-    });
+      setResultUrl((previous) => {
+        if (previous) URL.revokeObjectURL(previous);
+        return URL.createObjectURL(blob);
+      });
 
-    setSpectrum({
-      original: computeMagnitudeSpectrum(channelData[0]),
-      filtered: computeMagnitudeSpectrum(filtered[0]),
-    });
+      setSpectrum({
+        original: computeMagnitudeSpectrum(channelData[0]),
+        filtered: computeMagnitudeSpectrum(filtered[0]),
+      });
 
-    if (arithmeticMode === "float") {
-      setGeneratedCode(generateFloatBiquadCCode({ sections, blockSize }));
-      setOverflowDetected(false);
-      setQuantizationError(null);
-      return;
+      if (arithmeticMode === "float") {
+        setGeneratedCode(generateFloatBiquadCCode({ sections, blockSize }));
+        setOverflowDetected(false);
+        setQuantizationError(null);
+        return;
+      }
+
+      const qFormat = QFormat[qFormatName];
+      setGeneratedCode(generateFixedPointBiquadCCode({ sections, blockSize, qFormat }));
+
+      const simulations = channelData.map((samples) =>
+        simulateFixedPointBiquadCascade(samples, sections, qFormat),
+      );
+      setOverflowDetected(simulations.some((s) => s.overflowDetected));
+      setQuantizationError(
+        Math.max(...simulations.map((s, i) => computeMaxAbsoluteError(filtered[i], s.output))),
+      );
+    } finally {
+      setIsProcessing(false);
     }
-
-    const qFormat = QFormat[qFormatName];
-    setGeneratedCode(generateFixedPointBiquadCCode({ sections, blockSize, qFormat }));
-
-    const simulations = channelData.map((samples) =>
-      simulateFixedPointBiquadCascade(samples, sections, qFormat),
-    );
-    setOverflowDetected(simulations.some((s) => s.overflowDetected));
-    setQuantizationError(
-      Math.max(...simulations.map((s, i) => computeMaxAbsoluteError(filtered[i], s.output))),
-    );
   }
 
   async function handleCopyCode() {
@@ -396,8 +404,8 @@ export default function Home() {
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 
-          <Button onClick={handleRun} disabled={!header || !channelData}>
-            실행
+          <Button onClick={handleRun} disabled={!header || !channelData || isProcessing}>
+            {isProcessing ? "처리 중..." : "실행"}
           </Button>
 
           {arithmeticMode === "fixed" && overflowDetected && (
