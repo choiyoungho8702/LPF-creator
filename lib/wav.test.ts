@@ -93,4 +93,24 @@ describe("encodeWavFile", () => {
       });
     });
   });
+
+  it("채널별 float 샘플을 24비트 PCM WAV로 인코딩하면 헤더와 데이터를 원래 값으로 복원할 수 있다", () => {
+    const channelData = [new Float32Array([0.5, -0.5, 0])];
+    const sampleRate = 48000;
+    const bitDepth = 24;
+
+    const buffer = encodeWavFile(channelData, { sampleRate, bitDepth });
+
+    expect(parseWavHeader(buffer)).toEqual({ sampleRate, bitDepth, channels: 1 });
+
+    const decoded = decodePcmSamples(buffer.slice(WAV_DATA_OFFSET), {
+      bitDepth,
+      channels: 1,
+    });
+
+    decoded[0].forEach((value, j) => {
+      // 24비트 양자화 오차는 16비트보다 훨씬 작다.
+      expect(value).toBeCloseTo(channelData[0][j], 6);
+    });
+  });
 });

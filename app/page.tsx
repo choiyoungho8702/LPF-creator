@@ -24,6 +24,7 @@ import { generateFloatBiquadCCode } from "@/lib/codegen";
 import { generateFixedPointBiquadCCode } from "@/lib/codegen-fixed";
 import { applyBiquadCascade } from "@/lib/filter";
 import { computeMagnitudeSpectrum } from "@/lib/fft";
+import { parseFlacHeader } from "@/lib/flac";
 import { QFormat } from "@/lib/fixed-point";
 import { simulateFixedPointBiquadCascade } from "@/lib/fixed-point-simulate";
 import { decodePcmSamples } from "@/lib/pcm";
@@ -72,10 +73,12 @@ export default function Home() {
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const [rawBuffer, setRawBuffer] = useState<ArrayBuffer | null>(null);
   const [rawSampleRate, setRawSampleRate] = useState(44100);
   const [rawChannels, setRawChannels] = useState(1);
+  const [rawBitDepth, setRawBitDepth] = useState<16 | 24>(16);
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -84,15 +87,15 @@ export default function Home() {
     setError(null);
     setResultUrl(null);
 
-    if (/\.flac$/i.test(file.name)) {
-      setHeader(null);
-      setChannelData(null);
-      setError("FLAC 음원 디코딩은 아직 지원하지 않습니다. 헤더 메타데이터만 읽을 수 있습니다.");
-      return;
-    }
-
     const isRaw = /\.(raw|pcm)$/i.test(file.name);
     const buffer = await file.arrayBuffer();
+
+    if (/\.flac$/i.test(file.name)) {
+      setHeader(parseFlacHeader(buffer));
+      setChannelData(null);
+      setError("FLAC은 헤더 정보만 읽을 수 있습니다. 오디오 디코딩은 아직 지원하지 않아 실행할 수 없습니다.");
+      return;
+    }
 
     if (isRaw) {
       setHeader(null);
@@ -103,17 +106,17 @@ export default function Home() {
 
     const parsedHeader = parseWavHeader(buffer);
 
-    if (parsedHeader.bitDepth !== 16) {
+    if (parsedHeader.bitDepth !== 16 && parsedHeader.bitDepth !== 24) {
       setHeader(null);
       setChannelData(null);
-      setError("현재는 16비트 WAV 파일만 지원합니다.");
+      setError("현재는 16비트 또는 24비트 WAV 파일만 지원합니다.");
       return;
     }
 
     setHeader(parsedHeader);
     setChannelData(
       decodePcmSamples(buffer.slice(WAV_DATA_OFFSET), {
-        bitDepth: 16,
+        bitDepth: parsedHeader.bitDepth as 16 | 24,
         channels: parsedHeader.channels,
       }),
     );
@@ -122,12 +125,12 @@ export default function Home() {
   function handleApplyRawFormat() {
     if (!rawBuffer) return;
 
-    setHeader({ sampleRate: rawSampleRate, bitDepth: 16, channels: rawChannels });
-    setChannelData(decodePcmSamples(rawBuffer, { bitDepth: 16, channels: rawChannels }));
+    setHeader({ sampleRate: rawSampleRate, bitDepth: rawBitDepth, channels: rawChannels });
+    setChannelData(decodePcmSamples(rawBuffer, { bitDepth: rawBitDepth, channels: rawChannels }));
     setRawBuffer(null);
   }
 
-  function handleRun() {
+  async function handleRun() {
     if (!header || !channelData) return;
 
     if (cutoffFrequency >= header.sampleRate / 2) {
@@ -139,44 +142,54 @@ export default function Home() {
     }
 
     setError(null);
+    setIsProcessing(true);
+    // 로딩 상태가 실제로 화면에 그려지도록 다음 프레임까지 양보한 뒤 무거운 계산을 시작한다.
+    await new Promise((resolve) => requestAnimationFrame(resolve));
 
-    const sections = designButterworthLowpass({
-      sampleRate: header.sampleRate,
-      cutoffFrequency,
-      order,
-    });
+    try {
+      const sections = designButterworthLowpass({
+        sampleRate: header.sampleRate,
+        cutoffFrequency,
+        order,
+      });
 
-    const filtered = channelData.map((samples) => applyBiquadCascade(samples, sections));
-    const buffer = encodeWavFile(filtered, { sampleRate: header.sampleRate, bitDepth: 16 });
-    const blob = new Blob([buffer], { type: "audio/wav" });
+      const filtered = channelData.map((samples) => applyBiquadCascade(samples, sections));
+      const buffer = encodeWavFile(filtered, {
+        sampleRate: header.sampleRate,
+        bitDepth: header.bitDepth as 16 | 24,
+      });
+      const blob = new Blob([buffer], { type: "audio/wav" });
 
-    setResultUrl((previous) => {
-      if (previous) URL.revokeObjectURL(previous);
-      return URL.createObjectURL(blob);
-    });
+      setResultUrl((previous) => {
+        if (previous) URL.revokeObjectURL(previous);
+        return URL.createObjectURL(blob);
+      });
 
-    setSpectrum({
-      original: computeMagnitudeSpectrum(channelData[0]),
-      filtered: computeMagnitudeSpectrum(filtered[0]),
-    });
+      setSpectrum({
+        original: computeMagnitudeSpectrum(channelData[0]),
+        filtered: computeMagnitudeSpectrum(filtered[0]),
+      });
 
-    if (arithmeticMode === "float") {
-      setGeneratedCode(generateFloatBiquadCCode({ sections, blockSize }));
-      setOverflowDetected(false);
-      setQuantizationError(null);
-      return;
+      if (arithmeticMode === "float") {
+        setGeneratedCode(generateFloatBiquadCCode({ sections, blockSize }));
+        setOverflowDetected(false);
+        setQuantizationError(null);
+        return;
+      }
+
+      const qFormat = QFormat[qFormatName];
+      setGeneratedCode(generateFixedPointBiquadCCode({ sections, blockSize, qFormat }));
+
+      const simulations = channelData.map((samples) =>
+        simulateFixedPointBiquadCascade(samples, sections, qFormat),
+      );
+      setOverflowDetected(simulations.some((s) => s.overflowDetected));
+      setQuantizationError(
+        Math.max(...simulations.map((s, i) => computeMaxAbsoluteError(filtered[i], s.output))),
+      );
+    } finally {
+      setIsProcessing(false);
     }
-
-    const qFormat = QFormat[qFormatName];
-    setGeneratedCode(generateFixedPointBiquadCCode({ sections, blockSize, qFormat }));
-
-    const simulations = channelData.map((samples) =>
-      simulateFixedPointBiquadCascade(samples, sections, qFormat),
-    );
-    setOverflowDetected(simulations.some((s) => s.overflowDetected));
-    setQuantizationError(
-      Math.max(...simulations.map((s, i) => computeMaxAbsoluteError(filtered[i], s.output))),
-    );
   }
 
   async function handleCopyCode() {
@@ -233,8 +246,8 @@ export default function Home() {
 
         <FieldGroup>
           <Field>
-            <FieldLabel htmlFor="file">오디오 파일 (WAV 16비트, 또는 raw/pcm)</FieldLabel>
-            <Input id="file" type="file" accept=".wav,.raw,.pcm" onChange={handleFileChange} />
+            <FieldLabel htmlFor="file">오디오 파일 (WAV 16/24비트, FLAC(헤더만), 또는 raw/pcm)</FieldLabel>
+            <Input id="file" type="file" accept=".wav,.flac,.raw,.pcm" onChange={handleFileChange} />
           </Field>
 
           <Dialog open={rawBuffer !== null} onOpenChange={(open) => !open && setRawBuffer(null)}>
@@ -251,6 +264,21 @@ export default function Home() {
                     value={rawSampleRate}
                     onChange={(e) => setRawSampleRate(Number(e.target.value))}
                   />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="rawBitDepth">Bit Depth</FieldLabel>
+                  <Select
+                    value={String(rawBitDepth)}
+                    onValueChange={(value) => setRawBitDepth(Number(value) as 16 | 24)}
+                  >
+                    <SelectTrigger id="rawBitDepth">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="16">16-bit</SelectItem>
+                      <SelectItem value="24">24-bit</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </Field>
                 <Field>
                   <FieldLabel htmlFor="rawChannels">Channels</FieldLabel>
@@ -377,8 +405,8 @@ export default function Home() {
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 
-          <Button onClick={handleRun} disabled={!header || !channelData}>
-            실행
+          <Button onClick={handleRun} disabled={!header || !channelData || isProcessing}>
+            {isProcessing ? "처리 중..." : "실행"}
           </Button>
 
           {arithmeticMode === "fixed" && overflowDetected && (
