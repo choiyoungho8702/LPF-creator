@@ -84,6 +84,13 @@ export default function Home() {
     setError(null);
     setResultUrl(null);
 
+    if (/\.flac$/i.test(file.name)) {
+      setHeader(null);
+      setChannelData(null);
+      setError("FLAC 음원 디코딩은 아직 지원하지 않습니다. 헤더 메타데이터만 읽을 수 있습니다.");
+      return;
+    }
+
     const isRaw = /\.(raw|pcm)$/i.test(file.name);
     const buffer = await file.arrayBuffer();
 
