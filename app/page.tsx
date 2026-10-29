@@ -6,6 +6,13 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -66,6 +73,10 @@ export default function Home() {
   );
   const [error, setError] = useState<string | null>(null);
 
+  const [rawBuffer, setRawBuffer] = useState<ArrayBuffer | null>(null);
+  const [rawSampleRate, setRawSampleRate] = useState(44100);
+  const [rawChannels, setRawChannels] = useState(1);
+
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -73,7 +84,16 @@ export default function Home() {
     setError(null);
     setResultUrl(null);
 
+    const isRaw = /\.(raw|pcm)$/i.test(file.name);
     const buffer = await file.arrayBuffer();
+
+    if (isRaw) {
+      setHeader(null);
+      setChannelData(null);
+      setRawBuffer(buffer);
+      return;
+    }
+
     const parsedHeader = parseWavHeader(buffer);
 
     if (parsedHeader.bitDepth !== 16) {
@@ -90,6 +110,14 @@ export default function Home() {
         channels: parsedHeader.channels,
       }),
     );
+  }
+
+  function handleApplyRawFormat() {
+    if (!rawBuffer) return;
+
+    setHeader({ sampleRate: rawSampleRate, bitDepth: 16, channels: rawChannels });
+    setChannelData(decodePcmSamples(rawBuffer, { bitDepth: 16, channels: rawChannels }));
+    setRawBuffer(null);
   }
 
   function handleRun() {
@@ -198,9 +226,48 @@ export default function Home() {
 
         <FieldGroup>
           <Field>
-            <FieldLabel htmlFor="file">오디오 파일 (WAV, 16비트)</FieldLabel>
-            <Input id="file" type="file" accept=".wav" onChange={handleFileChange} />
+            <FieldLabel htmlFor="file">오디오 파일 (WAV 16비트, 또는 raw/pcm)</FieldLabel>
+            <Input id="file" type="file" accept=".wav,.raw,.pcm" onChange={handleFileChange} />
           </Field>
+
+          <Dialog open={rawBuffer !== null} onOpenChange={(open) => !open && setRawBuffer(null)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>원시 데이터 규격 입력</DialogTitle>
+              </DialogHeader>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="rawSampleRate">Sampling Rate (Hz)</FieldLabel>
+                  <Input
+                    id="rawSampleRate"
+                    type="number"
+                    value={rawSampleRate}
+                    onChange={(e) => setRawSampleRate(Number(e.target.value))}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="rawChannels">Channels</FieldLabel>
+                  <Select
+                    value={String(rawChannels)}
+                    onValueChange={(value) => setRawChannels(Number(value))}
+                  >
+                    <SelectTrigger id="rawChannels">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">Mono</SelectItem>
+                      <SelectItem value="2">Stereo</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </FieldGroup>
+              <DialogFooter>
+                <Button type="button" onClick={handleApplyRawFormat}>
+                  적용
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           {header && (
             <p className="text-sm text-muted-foreground">
