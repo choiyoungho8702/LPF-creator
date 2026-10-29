@@ -7,3 +7,15 @@ export function logFrequencyPosition(frequency: number, minFrequency: number, ma
   const clamped = Math.max(minFrequency, Math.min(maxFrequency, frequency));
   return (Math.log10(clamped) - Math.log10(minFrequency)) / (Math.log10(maxFrequency) - Math.log10(minFrequency));
 }
+
+const NICE_FREQUENCY_CANDIDATES = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000];
+
+/** [minFrequency, maxFrequency] 범위 안에 들어오는 보기 좋은 로그 눈금 주파수를 고른다. */
+export function niceFrequencyTicks(minFrequency: number, maxFrequency: number): number[] {
+  return NICE_FREQUENCY_CANDIDATES.filter((f) => f >= minFrequency && f <= maxFrequency);
+}
+
+/** 1000 이상은 "1k" 식으로, 그 미만은 그대로 표기한다. */
+export function formatFrequencyLabel(frequency: number): string {
+  return frequency >= 1000 ? `${frequency / 1000}k` : `${frequency}`;
+}
